@@ -149,11 +149,19 @@ creating a new stream.
 accept(server::TCPServer) = accept(server, TCPSocket())
 
 function accept(callback, server::LibuvServer)
-    @async while isopen(server)
-        # TODO: error handling is completely missing from this
-        client = accept(server)
-        callback(client)
-    end
+    task = @async try
+            while true
+                client = accept(server)
+                callback(client)
+            end
+        catch ex
+            # accept below may explicitly throw UV_ECONNABORTED:
+            # filter that out since we expect that error
+            if !(ex isa IOError && ex.code == UV_ECONNABORTED) || isopen(server)
+                rethrow()
+            end
+        end
+    return task # caller is responsible for checking for errors
 end
 
 
@@ -650,11 +658,11 @@ function accept_nonblock(server::TCPServer)
 end
 
 function accept(server::LibuvServer, client::LibuvStream)
-    if server.status != StatusActive
+    iolock_begin()
+    if server.status != StatusActive && server.status != StatusClosing && server.status != StatusClosed
         throw(ArgumentError("server not connected, make sure \"listen\" has been called"))
     end
     while isopen(server)
-        iolock_begin()
         err = accept_nonblock(server, client)
         if err == 0
             iolock_end()
@@ -664,13 +672,14 @@ function accept(server::LibuvServer, client::LibuvStream)
         end
         preserve_handle(server)
         lock(server.cond)
+        iolock_end()
         try
-            iolock_end()
             wait(server.cond)
         finally
             unlock(server.cond)
             unpreserve_handle(server)
         end
+        iolock_begin()
     end
     uv_error("accept", UV_ECONNABORTED)
     nothing

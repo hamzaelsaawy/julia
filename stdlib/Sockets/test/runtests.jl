@@ -147,12 +147,15 @@ defaultport = rand(2000:4000)
         t = accept(srv) do client
             write(client, "Hello World $(nconn += 1)\n")
             close(client)
+            nconn == 3 && Base.wait_close(srv)
         end
         @test read(connect(socketname), String) == "Hello World 1\n"
         @test read(connect(socketname), String) == "Hello World 2\n"
         @test read(connect(socketname), String) == "Hello World 3\n"
+        conn = connect(socketname)
         close(srv)
         wait(t)
+        @test read(conn, String) == ""
     end
 end
 
@@ -254,16 +257,29 @@ end
                 send(b, ip"127.0.0.1", randport, "Hello World $i")
             end
         end
-
-        let msg = Vector{UInt8}("1234"^16377)
-            @test_throws(Base._UVError("send", Base.UV_EMSGSIZE),
-                         send(b, ip"127.0.0.1", randport, msg))
-            pop!(msg)
+        let msg = Vector{UInt8}("fedcba9876543210"^36) # The minimum reassembly buffer size for IPv4 is 576 bytes
             tsk = @async @test recv(a) == msg
             @test send(b, ip"127.0.0.1", randport, msg) === nothing
             wait(tsk)
         end
-
+        let msg = Vector{UInt8}("1234"^16377) # The maximum size of an IPv4 datagram is 65535 bytes, including the header
+            @test_throws(Base._UVError("send", Base.UV_EMSGSIZE),
+                         send(b, ip"127.0.0.1", randport, msg))
+            pop!(msg)
+            tsk = @async recv(a)
+            try
+                send(b, ip"127.0.0.1", randport, msg)
+            catch ex
+                if !(ex isa Base.IOError && ex.code == Base.UV_EMSGSIZE) || Sys.islinux() || Sys.iswindows()
+                    # this is allowed failure on some platforms which might further restrict
+                    # the maximum packet size being sent (even locally), such as BSD's `sysctl net.inet.udp.maxdgram`
+                    rethrow()
+                end
+                empty!(msg)
+                send(b, ip"127.0.0.1", randport, msg) # check that the socket is still alive
+            end
+            @test fetch(tsk) == msg
+        end
         let tsk = @async send(b, ip"127.0.0.1", randport, "WORLD HELLO")
             (addr, data) = recvfrom(a)
             @test addr == ip"127.0.0.1" && String(data) == "WORLD HELLO"

@@ -326,8 +326,8 @@ end
         ccall(:uv_async_send, Cvoid, (Ptr{Cvoid},), async)
         ccall(:uv_async_send, Cvoid, (Ptr{Cvoid},), async)
         Base.process_events() # schedule event
-        ccall(:uv_async_send, Cvoid, (Ptr{Cvoid},), async)
         Sys.iswindows() && Base.process_events() # schedule event (windows?)
+        ccall(:uv_async_send, Cvoid, (Ptr{Cvoid},), async)
         @test tc[] == 0
         yield() # consume event
         @test tc[] == 1
